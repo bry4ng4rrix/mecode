@@ -15,7 +15,7 @@ SECRET_KEY = 'django-insecure-d=ttfspo-q371*g3$$+(xko1&6hv!@x_xqu&)%4v724_h*pf*+
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ["*"]
 
 
 # Application definition
@@ -133,3 +133,11 @@ SIMPLE_JWT = {
     'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
     'AUTH_HEADER_TYPES': ('Bearer',),
 }
+
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://localhost:8000",
+    "http://localhost:8081",
+]
+
+CORS_ALLOW_ALL_ORIGINS = True
