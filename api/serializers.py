@@ -52,6 +52,27 @@ class DepenseSerializer(serializers.ModelSerializer):
         fields = ['id', 'titre', 'montant_total', 'date', 'items']
         read_only_fields = ['montant_total', 'user']
 
+    def validate(self, data):
+        items_data = data.get('items', [])
+        total = sum(item['prix'] for item in items_data)
+        
+        user = self.context['request'].user
+        last_history = BudgetHistory.objects.filter(user=user).last()
+        current_budget = last_history.total_budget if last_history else 0
+        
+        if self.instance:
+            # En cas de modification, on vérifie si la différence dépasse le budget actuel
+            diff = total - self.instance.montant_total
+            if diff > current_budget:
+                raise serializers.ValidationError({"items": "Le nouveau montant total dépasse votre budget disponible."})
+        else:
+            # En cas de création
+            if total > current_budget:
+                raise serializers.ValidationError({"items": "Le montant total de la dépense dépasse votre budget actuel."})
+        
+        return data
+
+
     def create(self, validated_data):
         items_data = validated_data.pop('items')
         user = self.context['request'].user
