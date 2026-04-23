@@ -26,7 +26,7 @@ class BudgetListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         return Budget.objects.filter(user=self.request.user)
-    
+     
 
     def perform_create(self, serializer):
         # Enregistre le nouveau budget
@@ -82,6 +82,29 @@ class DepenseListCreateView(generics.ListCreateAPIView):
         # Soustrait le montant de la dépense
         new_total = current_total - depense.montant_total
         
+class DepenseListCreateView(generics.ListCreateAPIView):
+    serializer_class = DepenseSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return Depense.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        depense = serializer.save()
+        
+        # Récupère le dernier budget total
+        last_history = BudgetHistory.objects.filter(user=self.request.user).last()
+        current_total = last_history.total_budget if last_history else 0
+        
+        # Soustrait le montant de la dépense
+        new_total = current_total - depense.montant_total
+        
+        # Enregistre dans l'historique avec "-"
+        BudgetHistory.objects.create(
+            user=self.request.user,
+            total_budget=new_total,
+            titre="-"
+        )
         # Enregistre dans l'historique avec "-"
         BudgetHistory.objects.create(
             user=self.request.user,
