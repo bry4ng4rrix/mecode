@@ -34,11 +34,31 @@ class User(AbstractBaseUser, PermissionsMixin):
     Custom User model.
     Fields: email, first_name, last_name, is_active, is_staff
     """
+    ROLE_CHOICES = [
+        ('ASSOCIER', 'ASSOCIER'),
+        ('MANAGER', 'MANAGER'),
+        ('ADMIN', 'ADMIN'),
+    ]
     email = models.EmailField(max_length=255, unique=True)
     first_name = models.CharField(max_length=255, blank=True)
     last_name = models.CharField(max_length=255, blank=True)
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='MANAGER')
+    
+
+
+    
+    # New fields for Associate/Manager relationship
+    manager = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True, related_name='associates')
+    is_approved = models.BooleanField(default=False)
+    access_level = models.CharField(
+        max_length=20, 
+        choices=[('FULL', 'Full'), ('LIMITED', 'Limited')], 
+        null=True, 
+        blank=True
+    )
+    temp_manager_email = models.EmailField(max_length=255, null=True, blank=True)
 
     objects = UserManager()
 
@@ -75,15 +95,22 @@ class BudgetHistory(models.Model):
 
 
 class Depense(models.Model):
+    STATUS_CHOICES = [
+        ('PENDING', 'Pending'),
+        ('APPROVED', 'Approved'),
+        ('REJECTED', 'Rejected'),
+    ]
     titre = models.CharField(max_length=255, blank=True)
     montant_total = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     date = models.DateField(auto_now_add=True)
-    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='depenses')
+    added_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='added_depenses')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='APPROVED')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return f"{self.titre} - {self.montant_total}"
+        return f"{self.titre} - {self.montant_total} ({self.status})"
 
 
 class DepenseItem(models.Model):
@@ -93,3 +120,22 @@ class DepenseItem(models.Model):
 
     def __str__(self):
         return f"{self.nom}: {self.prix}"
+
+
+class UserAccess(models.Model):
+    ACCESS_LEVEL_CHOICES = [
+        ('FULL', 'Full Access'),
+        ('LIMITED', 'Limited Access'),
+    ]
+    owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name='shared_accesses_given')
+    shared_with = models.ForeignKey(User, on_delete=models.CASCADE, related_name='shared_accesses_received')
+    access_level = models.CharField(max_length=20, choices=ACCESS_LEVEL_CHOICES)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('owner', 'shared_with')
+
+    def __str__(self):
+        return f"{self.shared_with.email} has {self.access_level} on {self.owner.email}'s account"
+
+

@@ -1,9 +1,10 @@
-from rest_framework import generics, permissions
+from rest_framework import generics, permissions, status, viewsets
+from rest_framework.decorators import action
 from rest_framework.response import Response
-from .serializers import UserSerializer, BudgetSerializer, DepenseSerializer
+from .serializers import UserSerializer, BudgetSerializer, DepenseSerializer, UserAccessSerializer
 from django.contrib.auth import get_user_model
-from .models import Budget, BudgetHistory, Depense
-from django.db.models import Sum
+from .models import Budget, BudgetHistory, Depense, UserAccess
+from django.db.models import Sum, Q
 
 User = get_user_model()
 
@@ -19,26 +20,35 @@ class CurrentUserView(generics.RetrieveAPIView):
     def get_object(self):
         return self.request.user
 
+class UserAccessListCreateView(generics.ListCreateAPIView):
+    serializer_class = UserAccessSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return UserAccess.objects.filter(Q(owner=self.request.user) | Q(shared_with=self.request.user))
+
+    def perform_create(self, serializer):
+        serializer.save(owner=self.request.user)
+
+class UserAccessDeleteView(generics.DestroyAPIView):
+    queryset = UserAccess.objects.all()
+    serializer_class = UserAccessSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return UserAccess.objects.filter(owner=self.request.user)
+
 class BudgetListCreateView(generics.ListCreateAPIView):
-    queryset = Budget.objects.all()
     serializer_class = BudgetSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
         return Budget.objects.filter(user=self.request.user)
-     
 
     def perform_create(self, serializer):
-        # Enregistre le nouveau budget
         serializer.save(user=self.request.user)
-        
-        # Calcule le nouveau total et l'enregistre dans l'historique avec "+"
         total = Budget.objects.filter(user=self.request.user).aggregate(Sum('montant'))['montant__sum'] or 0
-        BudgetHistory.objects.create(
-            user=self.request.user,
-            total_budget=total,
-            titre="+"
-        )
+        BudgetHistory.objects.create(user=self.request.user, total_budget=total, titre="+")
 
 class BudgetDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = BudgetSerializer
@@ -49,106 +59,134 @@ class BudgetDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def perform_update(self, serializer):
         serializer.save()
-        # Recalcule le total après modification
-        self._update_history(titre="MOD")
+        self._update_history("MOD")
 
     def perform_destroy(self, instance):
         instance.delete()
-        # Recalcule le total après suppression avec "-"
-        self._update_history(titre="-")
+        self._update_history("-")
 
-    def _update_history(self, titre="+"):
+    def _update_history(self, titre):
         total = Budget.objects.filter(user=self.request.user).aggregate(Sum('montant'))['montant__sum'] or 0
-        BudgetHistory.objects.create(
-            user=self.request.user,
-            total_budget=total,
-            titre=titre
-        )
+        BudgetHistory.objects.create(user=self.request.user, total_budget=total, titre=titre)
 
 class DepenseListCreateView(generics.ListCreateAPIView):
     serializer_class = DepenseSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return Depense.objects.filter(user=self.request.user)
+        shared_accounts = UserAccess.objects.filter(shared_with=self.request.user).values_list('owner', flat=True)
+        # Add associates' accounts if the user is a manager
+        associate_accounts = User.objects.filter(manager=self.request.user).values_list('id', flat=True)
+        return Depense.objects.filter(Q(user=self.request.user) | Q(user__in=shared_accounts) | Q(user__in=associate_accounts))
 
     def perform_create(self, serializer):
         depense = serializer.save()
-        
-        # Récupère le dernier budget total
-        last_history = BudgetHistory.objects.filter(user=self.request.user).last()
-        current_total = last_history.total_budget if last_history else 0
-        
-        # Soustrait le montant de la dépense
-        new_total = current_total - depense.montant_total
-        
-class DepenseListCreateView(generics.ListCreateAPIView):
-    serializer_class = DepenseSerializer
-    permission_classes = [permissions.IsAuthenticated]
+        if depense.status == 'APPROVED':
+            self._update_budget_history(depense.user, -depense.montant_total, "-")
 
-    def get_queryset(self):
-        return Depense.objects.filter(user=self.request.user)
-
-    def perform_create(self, serializer):
-        depense = serializer.save()
-        
-        # Récupère le dernier budget total
-        last_history = BudgetHistory.objects.filter(user=self.request.user).last()
+    def _update_budget_history(self, user, montant_diff, titre):
+        last_history = BudgetHistory.objects.filter(user=user).last()
         current_total = last_history.total_budget if last_history else 0
-        
-        # Soustrait le montant de la dépense
-        new_total = current_total - depense.montant_total
-        
-        # Enregistre dans l'historique avec "-"
-        BudgetHistory.objects.create(
-            user=self.request.user,
-            total_budget=new_total,
-            titre="-"
-        )
-        # Enregistre dans l'historique avec "-"
-        BudgetHistory.objects.create(
-            user=self.request.user,
-            total_budget=new_total,
-            titre="-"
-        )
+        new_total = current_total + montant_diff
+        BudgetHistory.objects.create(user=user, total_budget=new_total, titre=titre)
 
 class DepenseDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = DepenseSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return Depense.objects.filter(user=self.request.user)
+        shared_accounts = UserAccess.objects.filter(shared_with=self.request.user).values_list('owner', flat=True)
+        # Add associates' accounts if the user is a manager
+        associate_accounts = User.objects.filter(manager=self.request.user).values_list('id', flat=True)
+        # On permet la lecture/modif si on est proprio ou si on a un accès FULL ou si on est le manager
+        return Depense.objects.filter(Q(user=self.request.user) | Q(user__in=shared_accounts) | Q(user__in=associate_accounts))
 
     def perform_update(self, serializer):
         old_instance = self.get_object()
         old_montant = old_instance.montant_total
+        old_status = old_instance.status
         
         depense = serializer.save()
-        new_montant = depense.montant_total
         
-        diff = new_montant - old_montant
-        
-        if diff != 0:
-            last_history = BudgetHistory.objects.filter(user=self.request.user).last()
-            current_total = last_history.total_budget if last_history else 0
-            new_total = current_total - diff
-            
-            BudgetHistory.objects.create(
-                user=self.request.user,
-                total_budget=new_total,
-                titre="MOD"
-            )
+        if depense.status == 'APPROVED':
+            diff = depense.montant_total - (old_montant if old_status == 'APPROVED' else 0)
+            if diff != 0:
+                self._update_budget_history(depense.user, -diff, "MOD")
 
     def perform_destroy(self, instance):
-        montant_restaure = instance.montant_total
+        montant_a_restaurer = instance.montant_total if instance.status == 'APPROVED' else 0
+        owner = instance.user
         instance.delete()
-        
-        last_history = BudgetHistory.objects.filter(user=self.request.user).last()
+        if montant_a_restaurer != 0:
+            self._update_budget_history(owner, montant_a_restaurer, "RESTORE")
+
+    def _update_budget_history(self, user, montant_diff, titre):
+        last_history = BudgetHistory.objects.filter(user=user).last()
         current_total = last_history.total_budget if last_history else 0
-        new_total = current_total + montant_restaure
+        new_total = current_total + montant_diff
+        BudgetHistory.objects.create(user=user, total_budget=new_total, titre=titre)
+
+class ApproveDepenseView(generics.UpdateAPIView):
+    queryset = Depense.objects.all()
+    serializer_class = DepenseSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return Depense.objects.filter(user=self.request.user, status='PENDING')
+
+    def patch(self, request, *args, **kwargs):
+        instance = self.get_object()
+        action = request.data.get('action')
         
-        BudgetHistory.objects.create(
-            user=self.request.user,
-            total_budget=new_total,
-            titre="RESTORE"
-        )
+        if action == 'APPROVE':
+            instance.status = 'APPROVED'
+            instance.save()
+            last_history = BudgetHistory.objects.filter(user=instance.user).last()
+            current_total = last_history.total_budget if last_history else 0
+            new_total = current_total - instance.montant_total
+            BudgetHistory.objects.create(user=instance.user, total_budget=new_total, titre="DEPENSE APPROVED")
+            return Response({"status": "approved"})
+        elif action == 'REJECT':
+            instance.status = 'REJECTED'
+            instance.save()
+            return Response({"status": "rejected"})
+        
+        return Response({"error": "Invalid action"}, status=status.HTTP_400_BAD_REQUEST)
+
+class AssociateViewSet(viewsets.ModelViewSet):
+    serializer_class = UserSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        if self.request.user.role != 'MANAGER':
+            return User.objects.none()
+        return User.objects.filter(manager=self.request.user)
+
+    def perform_create(self, serializer):
+        # A manager can create an associate directly
+        serializer.save(manager=self.request.user, role='ASSOCIER', is_approved=True)
+
+    @action(detail=True, methods=['patch'])
+    def approve(self, request, pk=None):
+        associate = self.get_object()
+        action_type = request.data.get('action') # 'APPROVE' or 'REJECT'
+        access_level = request.data.get('access_level', 'LIMITED')
+        
+        if action_type == 'APPROVE':
+            associate.is_approved = True
+            associate.access_level = access_level
+            associate.save()
+            
+            UserAccess.objects.update_or_create(
+                owner=associate,
+                shared_with=self.request.user,
+                defaults={'access_level': access_level}
+            )
+            return Response({"status": "approved", "access_level": access_level})
+        elif action_type == 'REJECT':
+            associate.is_approved = False
+            associate.manager = None
+            associate.save()
+            return Response({"status": "rejected"})
+            
+        return Response({"error": "Invalid action"}, status=status.HTTP_400_BAD_REQUEST)
